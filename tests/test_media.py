@@ -54,3 +54,17 @@ def test_compress_with_audio_maps_audio_source():
     assert "-c:v" in cmd and cmd[cmd.index("-c:v") + 1] == "libx264"
     assert "-c:a" in cmd and cmd[cmd.index("-c:a") + 1] == "aac"
     assert "-t" in cmd and cmd[cmd.index("-t") + 1] == "60.000"
+
+
+def test_compression_quality_bitrates_and_crf():
+    # Smallest file uses 96k audio and high compression CRF
+    cmd_small = media.build_command(Path("in.mp4"), Path("out.mp4"), opts(quality="small", codec="h265"), 100)
+    assert cmd_small[cmd_small.index("-crf") + 1] == "34"
+    assert cmd_small[cmd_small.index("-b:a") + 1] == "96k"
+
+    # Balanced uses 128k audio
+    cmd_bal = media.build_command(Path("in.mp4"), Path("out.mp4"), opts(quality="balanced", codec="h264"), 100)
+    assert cmd_bal[cmd_bal.index("-crf") + 1] == "23"
+    assert cmd_bal[cmd_bal.index("-b:a") + 1] == "128k"
+
+

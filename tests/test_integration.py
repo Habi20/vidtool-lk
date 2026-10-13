@@ -273,3 +273,60 @@ def test_combine_video_and_audio_lifecycle(client, sample_video, sample_audio):
 
     # 6. Clean up
     client.delete(f"/api/jobs/{job_id}", headers=headers)
+
+
+def test_compress_with_audio_lifecycle(client, sample_video, sample_audio):
+    headers = {
+        "Host": f"127.0.0.1:{config.PORT}",
+        "X-Token": config.TOKEN,
+        "Origin": f"http://127.0.0.1:{config.PORT}"
+    }
+
+    # Upload video
+    with open(sample_video, "rb") as f:
+        res_v = client.post(f"/api/upload?name={sample_video.name}", content=f.read(), headers=headers)
+    video_file_id = res_v.json()["file_id"]
+
+    # Upload audio
+    with open(sample_audio, "rb") as f:
+        res_a = client.post(f"/api/upload?name={sample_audio.name}", content=f.read(), headers=headers)
+    audio_file_id = res_a.json()["file_id"]
+
+    # Create job with mode "compress", quality "small", codec "h264" and audio attached
+    job_req = {
+        "file_id": video_file_id,
+        "name": "lecture_part1.mp4",
+        "audio_file_id": audio_file_id,
+        "audio_name": "clean_mic.m4a",
+        "options": {
+            "mode": "compress",
+            "codec": "h264",
+            "quality": "small",
+            "speed": "fast",
+            "container": "mp4",
+            "start": 0
+        }
+    }
+    res = client.post("/api/jobs", json=job_req, headers=headers)
+    assert res.status_code == 200
+    job_id = res.json()["id"]
+
+    for _ in range(50):
+        res = client.get("/api/jobs", headers=headers)
+        target = next((j for j in res.json() if j["id"] == job_id), None)
+        if target and target["status"] in ("done", "failed"):
+            break
+        time.sleep(0.1)
+
+    assert target["status"] == "done", f"Job failed: {target.get('error')}"
+    assert target["out_size"] > 0
+
+    # Verify download filename has lecture_part1-combined.mp4
+    dl = client.get(f"/api/jobs/{job_id}/download", headers=headers)
+    assert dl.status_code == 200
+    assert "lecture_part1-combined.mp4" in dl.headers.get("content-disposition", "")
+
+    # Clean up
+    client.delete(f"/api/jobs/{job_id}", headers=headers)
+
+

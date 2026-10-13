@@ -4,7 +4,8 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
-CRF = {"h264": {"small": 28, "balanced": 23, "high": 19}, "h265": {"small": 32, "balanced": 28, "high": 24}}
+CRF = {"h264": {"small": 30, "balanced": 23, "high": 19}, "h265": {"small": 34, "balanced": 28, "high": 24}}
+AUDIO_BITRATE = {"small": "96k", "balanced": "128k", "high": "160k"}
 PRESET = {"fast": "veryfast", "balanced": "medium", "thorough": "slow"}
 LIB = {"h264": "libx264", "h265": "libx265"}
 
@@ -96,16 +97,18 @@ def build_command(src: Path, dst: Path, o: dict, duration: float, audio_src: Pat
 
     mode = o.get("mode", "compress")
     if mode == "combine":                         # instant mux: copy video, transcode audio to standard aac
-        cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]
+        cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "128k"]
     elif mode == "trim":                          # lossless cuts
         if audio_src:
-            cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-avoid_negative_ts", "make_zero"]
+            cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-avoid_negative_ts", "make_zero"]
         else:
             cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero"]
     else:
         codec = o["codec"]
-        cmd += ["-c:v", LIB[codec], "-crf", str(CRF[codec][o["quality"]]), "-preset", PRESET[o["speed"]],
-                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k"]
+        quality = o["quality"]
+        abitrate = AUDIO_BITRATE.get(quality, "128k")
+        cmd += ["-c:v", LIB[codec], "-crf", str(CRF[codec][quality]), "-preset", PRESET[o["speed"]],
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", abitrate]
         if o.get("max_height"):
             cmd += ["-vf", f"scale=-2:'min(ih,{int(o['max_height'])})'"]
         if codec == "h265" and o["container"] == "mp4":

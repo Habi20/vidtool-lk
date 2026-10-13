@@ -23,7 +23,11 @@ def _run(job_id: str) -> None:
     src = Path(job["input_path"])
     audio_src = Path(job["audio_path"]) if job.get("audio_path") else None
 
-    dst = OUTPUT_DIR / f"{job_id}.{o['container']}"
+    stem = Path(job.get("display_name") or "video").stem
+    safe_stem = security.display_name(stem)[:60]
+    has_audio = bool(job.get("audio_path")) or bool(o.get("audio_name"))
+    tag = "combined" if (o.get("mode") == "combine" or has_audio) else ("trimmed" if o.get("mode") == "trim" else "comp")
+    dst = OUTPUT_DIR / f"{safe_stem}-{tag}-{job_id[:8]}.{o['container']}"
     try:
         db.update(job_id, status="running", progress=0)
         start, end = media.trim_window(o, job["duration"])
