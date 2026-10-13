@@ -41,3 +41,25 @@ def is_within(base: Path, target: Path) -> bool:
 def host_only(host_header: str) -> str:
     """'127.0.0.1:8765' -> '127.0.0.1'."""
     return (host_header or "").rsplit(":", 1)[0] if ":" in (host_header or "") else (host_header or "")
+
+
+def deduplicate_names(names: list[str]) -> list[str]:
+    """Ensure filenames are unique case-insensitively for safe extraction across platforms."""
+    seen: dict[str, int] = {}
+    result: list[str] = []
+    for name in names:
+        p = Path(name)
+        stem, ext = p.stem, p.suffix
+        lower_key = name.lower()
+        if lower_key not in seen:
+            seen[lower_key] = 1
+            result.append(name)
+        else:
+            count = 2
+            candidate = f"{stem} ({count}){ext}"
+            while candidate.lower() in seen:
+                count += 1
+                candidate = f"{stem} ({count}){ext}"
+            seen[candidate.lower()] = 1
+            result.append(candidate)
+    return result

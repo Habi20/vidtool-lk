@@ -1,12 +1,14 @@
-"""HTTP layer only: validate, delegate, respond. No ffmpeg or SQL here."""
+import io
 import secrets
+import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -18,6 +20,21 @@ db.init()
 
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
        "img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+
+
+class StreamBuffer(io.RawIOBase):
+    def __init__(self):
+        self._buffer = bytearray()
+
+    def write(self, b):
+        if b:
+            self._buffer.extend(b)
+        return len(b)
+
+    def read_all(self):
+        chunk = bytes(self._buffer)
+        self._buffer.clear()
+        return chunk
 
 
 @app.middleware("http")
@@ -55,6 +72,7 @@ class JobRequest(BaseModel):
     file_id: str
     name: str = Field("video", max_length=255)
     options: Options
+    batch_id: Optional[str] = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -93,22 +111,43 @@ async def upload(request: Request, name: str):
     return {"file_id": file_id, "size": size, **info}
 
 
+def _to_dict(model: BaseModel) -> dict:
+    return model.model_dump() if hasattr(model, "model_dump") else model.dict()
+
+
 @app.post("/api/jobs", dependencies=[Depends(auth)])
 def create_job(req: JobRequest):
     try:
         file_id = security.parse_id(req.file_id)
     except ValueError:
         raise HTTPException(400, "Invalid file id")
+
+    batch_id = None
+    if req.batch_id:
+        try:
+            batch_id = security.parse_id(req.batch_id)
+        except ValueError:
+            raise HTTPException(400, "Invalid batch id")
+        stats = db.get_batch_stats(batch_id)
+        if stats["count"] >= config.MAX_BATCH_FILES:
+            raise HTTPException(413, f"Batch file count limit ({config.MAX_BATCH_FILES}) exceeded")
+
     src = next(config.UPLOAD_DIR.glob(f"{file_id}.*"), None)
     if not src or not security.is_within(config.UPLOAD_DIR, src):
         raise HTTPException(404, "Upload not found")
+
+    if batch_id:
+        if stats["total_size"] + src.stat().st_size > config.MAX_BATCH_BYTES:
+            raise HTTPException(413, "Batch total size limit exceeded")
+
     info = media.probe(src)
+    opts_dict = _to_dict(req.options)
     try:
-        media.trim_window(req.options.model_dump(), info["duration"])
+        media.trim_window(opts_dict, info["duration"])
     except media.MediaError as e:
         raise HTTPException(422, str(e))
     job_id = uuid.uuid4().hex
-    db.create_job(job_id, security.display_name(req.name), src, req.options.model_dump(), src.stat().st_size, info["duration"])
+    db.create_job(job_id, security.display_name(req.name), src, opts_dict, src.stat().st_size, info["duration"], batch_id)
     worker.submit(job_id)
     return db.get(job_id)
 
@@ -124,7 +163,55 @@ def download(job_id: str):
     out = Path(job["output_path"] or "")
     if job["status"] != "done" or not security.is_within(config.OUTPUT_DIR, out) or not out.exists():
         raise HTTPException(404, "Output not available")
-    return FileResponse(out, filename=f"{Path(job['display_name']).stem}-shrunk{out.suffix}")
+    filename = f"{Path(job['display_name']).stem}-comp{out.suffix}"
+    return FileResponse(out, filename=filename, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/api/batches/{batch_id}/download", dependencies=[Depends(auth)])
+def download_batch(batch_id: str):
+    try:
+        security.parse_id(batch_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid batch id")
+
+    batch_jobs = db.get_batch_jobs(batch_id)
+    valid_jobs = []
+    raw_names = []
+    for j in batch_jobs:
+        if j["status"] == "done" and j["output_path"]:
+            out = Path(j["output_path"])
+            if security.is_within(config.OUTPUT_DIR, out) and out.exists():
+                valid_jobs.append(j)
+                stem = Path(j["display_name"]).stem
+                raw_names.append(f"{stem}-comp{out.suffix}")
+
+    if not valid_jobs:
+        raise HTTPException(404, "No completed outputs found for this batch")
+
+    deduped_names = security.deduplicate_names(raw_names)
+
+    def stream_zip():
+        buf = StreamBuffer()
+        with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_STORED) as zf:
+            for job, entry_name in zip(valid_jobs, deduped_names):
+                out_path = Path(job["output_path"])
+                info = zipfile.ZipInfo(entry_name)
+                info.date_time = time.localtime(out_path.stat().st_mtime)[:6]
+                info.external_attr = 0o600 << 16
+                with zf.open(info, mode="w", force_zip64=True) as dest_file:
+                    with open(out_path, "rb") as src_file:
+                        while chunk := src_file.read(64 * 1024):
+                            dest_file.write(chunk)
+                            yield buf.read_all()
+                yield buf.read_all()
+        yield buf.read_all()
+
+    filename = f"shrinkwrap-batch-{batch_id[:8]}.zip"
+    return StreamingResponse(
+        stream_zip(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 
 @app.delete("/api/jobs/{job_id}", dependencies=[Depends(auth)])

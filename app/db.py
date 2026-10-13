@@ -4,6 +4,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 
+from . import config
 from .config import DB_PATH
 
 SCHEMA = """
@@ -19,7 +20,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   in_size INTEGER,
   out_size INTEGER,
   duration REAL,
-  created_at REAL NOT NULL
+  created_at REAL NOT NULL,
+  batch_id TEXT
 );
 """
 
@@ -36,19 +38,32 @@ def conn():
         c.close()
 
 
+def cleanup_old_uploads():
+    now = time.time()
+    cutoff = now - 86400
+    if config.UPLOAD_DIR.exists():
+        for p in config.UPLOAD_DIR.glob("*"):
+            if p.is_file() and p.stat().st_mtime < cutoff:
+                p.unlink(missing_ok=True)
+
+
 def init():
     with conn() as c:
         c.executescript(SCHEMA)
+        cols = [r["name"] for r in c.execute("PRAGMA table_info(jobs)").fetchall()]
+        if "batch_id" not in cols:
+            c.execute("ALTER TABLE jobs ADD COLUMN batch_id TEXT")
         # A crash mid-encode must not leave jobs "running" forever.
         c.execute("UPDATE jobs SET status='failed', error='Interrupted by restart' WHERE status IN ('queued','running')")
+    cleanup_old_uploads()
 
 
-def create_job(job_id, display_name, input_path, options: dict, in_size, duration):
+def create_job(job_id, display_name, input_path, options: dict, in_size, duration, batch_id: str = None):
     with conn() as c:
         c.execute(
-            "INSERT INTO jobs (id, display_name, input_path, options, status, in_size, duration, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?)",
-            (job_id, display_name, str(input_path), json.dumps(options), "queued", in_size, duration, time.time()),
+            "INSERT INTO jobs (id, display_name, input_path, options, status, in_size, duration, created_at, batch_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (job_id, display_name, str(input_path), json.dumps(options), "queued", in_size, duration, time.time(), batch_id),
         )
 
 
@@ -66,6 +81,17 @@ def get(job_id):
     with conn() as c:
         row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return dict(row) if row else None
+
+
+def get_batch_stats(batch_id: str):
+    with conn() as c:
+        row = c.execute("SELECT COUNT(*) as count, COALESCE(SUM(in_size), 0) as total_size FROM jobs WHERE batch_id=?", (batch_id,)).fetchone()
+        return dict(row) if row else {"count": 0, "total_size": 0}
+
+
+def get_batch_jobs(batch_id: str):
+    with conn() as c:
+        return [dict(r) for r in c.execute("SELECT * FROM jobs WHERE batch_id=? ORDER BY created_at ASC", (batch_id,))]
 
 
 def list_jobs(limit=50):
