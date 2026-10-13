@@ -2,10 +2,20 @@
 import re
 from pathlib import Path
 
-from .config import ALLOWED_EXT
+from .config import ALLOWED_EXT, ALLOWED_AUDIO_EXT, ALLOWED_VIDEO_EXT
 
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
 _BAD_NAME_CHARS = re.compile(r"[^\w.\- ()]+")
+
+
+def is_audio_ext(filename: str) -> bool:
+    """Return True if extension is an allowed audio format."""
+    return Path(filename or "").suffix.lower() in ALLOWED_AUDIO_EXT
+
+
+def is_video_ext(filename: str) -> bool:
+    """Return True if extension is an allowed video format."""
+    return Path(filename or "").suffix.lower() in ALLOWED_VIDEO_EXT
 
 
 def validate_ext(filename: str) -> str:
@@ -63,3 +73,4 @@ def deduplicate_names(names: list[str]) -> list[str]:
             seen[candidate.lower()] = 1
             result.append(candidate)
     return result
+

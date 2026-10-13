@@ -36,6 +36,22 @@ def sample_video(tmp_path):
     return video_path
 
 
+@pytest.fixture
+def sample_audio(tmp_path):
+    """Generate a 2-second test audio file in m4a format."""
+    audio_path = tmp_path / "test_audio.m4a"
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+        "-c:a", "aac",
+        str(audio_path)
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0 or not audio_path.exists():
+        pytest.skip(f"Could not generate sample audio: {res.stderr}")
+    return audio_path
+
+
 def test_auth_rejection(client):
     res = client.get("/api/jobs", headers={"Host": f"127.0.0.1:{config.PORT}"})
     assert res.status_code == 401
@@ -193,3 +209,67 @@ def test_batch_encoding_and_zip_download(client, sample_video):
     assert len(names) == 2
     assert "clip1-comp.mp4" in names
     assert "clip1-comp (2).mp4" in names
+
+
+def test_combine_video_and_audio_lifecycle(client, sample_video, sample_audio):
+    headers = {
+        "Host": f"127.0.0.1:{config.PORT}",
+        "X-Token": config.TOKEN,
+        "Origin": f"http://127.0.0.1:{config.PORT}"
+    }
+
+    # 1. Upload video
+    with open(sample_video, "rb") as f:
+        res_v = client.post(f"/api/upload?name={sample_video.name}", content=f.read(), headers=headers)
+    assert res_v.status_code == 200
+    video_file_id = res_v.json()["file_id"]
+    assert res_v.json()["media_type"] == "video"
+
+    # 2. Upload audio (m4a)
+    with open(sample_audio, "rb") as f:
+        res_a = client.post(f"/api/upload?name={sample_audio.name}", content=f.read(), headers=headers)
+    assert res_a.status_code == 200
+    audio_file_id = res_a.json()["file_id"]
+    assert res_a.json()["media_type"] == "audio"
+
+    # 3. Create combine job
+    job_req = {
+        "file_id": video_file_id,
+        "name": "combined_test.mp4",
+        "audio_file_id": audio_file_id,
+        "audio_name": "test_audio.m4a",
+        "options": {
+            "mode": "combine",
+            "codec": "h264",
+            "quality": "balanced",
+            "speed": "fast",
+            "container": "mp4",
+            "start": 0
+        }
+    }
+    res = client.post("/api/jobs", json=job_req, headers=headers)
+    assert res.status_code == 200, f"Combine job creation failed: {res.text}"
+    job_id = res.json()["id"]
+
+    # 4. Poll until completed
+    for _ in range(50):
+        res = client.get("/api/jobs", headers=headers)
+        assert res.status_code == 200
+        jobs = res.json()
+        target = next((j for j in jobs if j["id"] == job_id), None)
+        assert target is not None
+        if target["status"] in ("done", "failed"):
+            break
+        time.sleep(0.1)
+
+    assert target["status"] == "done", f"Job failed: {target.get('error')}"
+    assert target["out_size"] > 0
+
+    # 5. Download output and verify filename and content
+    dl = client.get(f"/api/jobs/{job_id}/download", headers=headers)
+    assert dl.status_code == 200
+    assert len(dl.content) == target["out_size"]
+    assert "combined_test-combined.mp4" in dl.headers.get("content-disposition", "")
+
+    # 6. Clean up
+    client.delete(f"/api/jobs/{job_id}", headers=headers)

@@ -25,3 +25,32 @@ def test_bad_trim_rejected():
 
 def test_network_protocols_blocked():
     assert "-protocol_whitelist" in media.build_command(Path("a"), Path("b"), opts(), 10)
+
+
+def test_combine_audio_maps_streams_and_bounds_duration():
+    cmd = media.build_command(Path("in.mp4"), Path("out.mp4"), opts(mode="combine"), 45.0, audio_src=Path("track.m4a"))
+    assert "-i" in cmd
+    # Two -i flags for video and audio
+    indices = [i for i, x in enumerate(cmd) if x == "-i"]
+    assert len(indices) == 2
+    assert cmd[indices[0] + 1] == "in.mp4"
+    assert cmd[indices[1] + 1] == "track.m4a"
+    # Stream mappings
+    assert "-map" in cmd
+    assert cmd[cmd.index("-map") + 1] == "0:v:0"
+    map2_idx = cmd.index("-map", cmd.index("-map") + 2)
+    assert cmd[map2_idx + 1] == "1:a:0"
+    # Video copied, audio transcoded to aac
+    assert "-c:v" in cmd and cmd[cmd.index("-c:v") + 1] == "copy"
+    assert "-c:a" in cmd and cmd[cmd.index("-c:a") + 1] == "aac"
+    # Duration bounded to video length
+    assert "-t" in cmd and cmd[cmd.index("-t") + 1] == "45.000"
+
+
+def test_compress_with_audio_maps_audio_source():
+    cmd = media.build_command(Path("in.mp4"), Path("out.mp4"), opts(mode="compress"), 60.0, audio_src=Path("audio.wav"))
+    assert "-map" in cmd
+    assert "1:a:0" in cmd
+    assert "-c:v" in cmd and cmd[cmd.index("-c:v") + 1] == "libx264"
+    assert "-c:a" in cmd and cmd[cmd.index("-c:a") + 1] == "aac"
+    assert "-t" in cmd and cmd[cmd.index("-t") + 1] == "60.000"

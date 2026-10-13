@@ -60,6 +60,23 @@ Each decision, the principle behind it, and the cost we accepted.
 
 **Delete input after processing.** Uploading copies the file; keeping copies would silently fill your disk.
 
+**Sequential upload for batch mode.** Uploading files one by one keeps RAM usage predictable, avoids disk write contention, and allows accurate per-file upload progress tracking while isolating errors so rejected files do not break the rest of the batch.
+
+**No trimming in batch mode.** Trimming requires reviewing cut timestamps for a specific clip. Batch compression applies uniform encoding options across videos, so trim options are disabled for multi-file selections.
+
+**Server-streamed ZIP for batch downloads.** Browsers block or prompt on multiple automated file downloads. A server-streamed ZIP (`ZIP_STORED`, `force_zip64=True`) via a non-seekable chunk writer lets users download all finished outputs in a single clean stream without buffering large archives in memory or disk.
+
+**Audio combination replaces original track with video duration bound.** Replacing the audio track instead of mixing avoids acoustic distortion and volume clipping, providing a clean replacement track (e.g., voiceovers, soundtrack replacement). The duration is strictly bounded (`-t`) to the video length so the video does not hang on a frozen frame if the audio file is longer.
+
+**Fast audio merge uses video stream copy without bloating audio.** Re-encoding video frames is CPU/GPU heavy and can take minutes. Combining an audio file with an existing video without re-encoding copies the video stream (`-c:v copy`) while transcoding the audio track to universal AAC (`-c:a aac -b:a 128k`), completing in 1–2 seconds with 100% lossless video fidelity. Users who want to shrink file size choose `Compress & Merge` (with quality-tailored audio bitrates down to 96k).
+
+**Smart stem auto-matching for batch audio.** When users record video and separate microphone/system audio, files frequently share identical names with different extensions (e.g. `recording_01.mp4` + `recording_01.m4a`). Auto-matching eliminates tedious manual selection while per-item dropdowns and the global "Apply to all" control give flexible manual control.
+
+**Descriptive output filenames reflecting video source.** Saving files as anonymous UUIDs makes managing finished outputs in the filesystem difficult. Output files in `outputs/` are named `<video_stem>-<tag>-<short_id>.<ext>` and browser downloads receive `<video_stem>-combined.<ext>` (or `-compressed.<ext>`), ensuring files are immediately recognizable.
+
+**Reference-counted upload cleanup.** In batch jobs where multiple videos share a single audio file (e.g. background track applied to all videos), unlinking input files immediately after each job finishes would break subsequent jobs. Checking whether a file is still referenced by queued or running jobs ensures uploaded inputs are kept alive until all dependent jobs finish, preventing file-not-found errors.
+
 ## Why hosting features are deferred
 
 Auto-scaling, rapid server adaptation and multi-user auth all need decisions (cloud, queue, billing) that you can't make well until the local tool proves useful. The seams are already in place: `media.py` (engine), `worker.py` (execution), `db.py` (state). Replacing each is a contained change, which is the practical meaning of "build for now, don't block later".
+

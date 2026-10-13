@@ -23,13 +23,45 @@ def probe(path: Path) -> dict:
     except subprocess.TimeoutExpired:
         raise MediaError("File could not be read in time")
     if r.returncode != 0:
-        raise MediaError("File is not a readable video")
+        raise MediaError("File is not a readable media file")
     data = json.loads(r.stdout or "{}")
     video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
-    duration = float(data.get("format", {}).get("duration") or 0)
-    if not video or duration <= 0:
-        raise MediaError("No video stream found in this file")
-    return {"duration": duration, "width": video.get("width"), "height": video.get("height"), "codec": video.get("codec_name")}
+    audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
+
+    # Some audio files (e.g. mp3, m4a) have embedded album art tagged as video stream
+    is_attached_pic = bool(video and video.get("disposition", {}).get("attached_pic"))
+
+    fmt_duration = data.get("format", {}).get("duration")
+    stream_duration = (video.get("duration") if video and not is_attached_pic else None) or (audio.get("duration") if audio else None)
+
+    duration = 0.0
+    try:
+        if fmt_duration and fmt_duration != "N/A":
+            duration = float(fmt_duration)
+        elif stream_duration and stream_duration != "N/A":
+            duration = float(stream_duration)
+    except (ValueError, TypeError):
+        duration = 0.0
+
+    if video and not is_attached_pic and duration > 0:
+        return {
+            "media_type": "video",
+            "duration": duration,
+            "width": video.get("width"),
+            "height": video.get("height"),
+            "codec": video.get("codec_name"),
+            "has_audio": audio is not None,
+        }
+    elif audio and duration > 0:
+        return {
+            "media_type": "audio",
+            "duration": duration,
+            "codec": audio.get("codec_name"),
+            "channels": audio.get("channels"),
+            "sample_rate": audio.get("sample_rate"),
+        }
+    else:
+        raise MediaError("No playable video or audio stream found in this file")
 
 
 def trim_window(o: dict, duration: float) -> tuple[float, float]:
@@ -40,7 +72,7 @@ def trim_window(o: dict, duration: float) -> tuple[float, float]:
     return start, end
 
 
-def build_command(src: Path, dst: Path, o: dict, duration: float) -> list[str]:
+def build_command(src: Path, dst: Path, o: dict, duration: float, audio_src: Path | None = None) -> list[str]:
     """Returns an argv list. It is never joined into a string or run through a shell."""
     start, end = trim_window(o, duration)
     cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-y", "-protocol_whitelist", "file",
@@ -48,12 +80,28 @@ def build_command(src: Path, dst: Path, o: dict, duration: float) -> list[str]:
     if start > 0:
         cmd += ["-ss", f"{start:.3f}"]            # before -i = fast seek
     cmd += ["-i", str(src)]
-    if start > 0 or end < duration:
-        cmd += ["-t", f"{end - start:.3f}"]
-    cmd += ["-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn"]
+    if audio_src:
+        if start > 0:
+            cmd += ["-ss", f"{start:.3f}"]
+        cmd += ["-i", str(audio_src)]
 
-    if o["mode"] == "trim":                        # lossless and near-instant (cuts land on keyframes)
-        cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero"]
+    clip_dur = end - start
+    if start > 0 or end < duration or audio_src:
+        cmd += ["-t", f"{clip_dur:.3f}"]
+
+    if audio_src:
+        cmd += ["-map", "0:v:0", "-map", "1:a:0", "-sn", "-dn"]
+    else:
+        cmd += ["-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn"]
+
+    mode = o.get("mode", "compress")
+    if mode == "combine":                         # instant mux: copy video, transcode audio to standard aac
+        cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]
+    elif mode == "trim":                          # lossless cuts
+        if audio_src:
+            cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-avoid_negative_ts", "make_zero"]
+        else:
+            cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero"]
     else:
         codec = o["codec"]
         cmd += ["-c:v", LIB[codec], "-crf", str(CRF[codec][o["quality"]]), "-preset", PRESET[o["speed"]],
@@ -76,7 +124,12 @@ def run(cmd: list[str], total_seconds: float, log_path: Path, on_progress: Calla
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=log, text=True)
         for line in p.stdout:
             key, _, val = line.strip().partition("=")
-            if key in ("out_time_us", "out_time_ms") and val.isdigit():
-                on_progress(min(int(val) / 1_000_000 / max(total_seconds, 0.001), 0.99))
+            if key in ("out_time_us", "out_time_ms"):
+                clean_val = val.lstrip("-")
+                if clean_val.isdigit():
+                    sec = int(val) / 1_000_000
+                    prog = max(0.0, min(sec / max(total_seconds, 0.001), 0.99))
+                    on_progress(prog)
         if p.wait() != 0:
             raise MediaError(f"Encoding failed (see log {log_path.name})")
+

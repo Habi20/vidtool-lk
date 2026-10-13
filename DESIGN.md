@@ -8,9 +8,11 @@ Local video compressor and trimmer. MVP scope: runs on your machine, nothing lea
 |---|---|
 | Compress video (H.264 / H.265) | Hosting on a server |
 | Trim (lossless instant cut, or cut + re-encode) | Multi-user accounts |
-| Accept most common formats (mp4, mkv, mov, avi, webm, m4v, flv, wmv, mpg, ts, 3gp) | Parallel workers, autoscaling, queues |
-| Local-only, hardened frontend, backend and DB | Hardware encoders (NVENC, VideoToolbox, QSV) |
-| Easy to debug and extend | Batch / watch-folder mode |
+| Combine video with audio files (instant mux or compress + audio) | Parallel workers, autoscaling, queues |
+| Accept video (mp4, mkv, mov, avi, webm, m4v, flv, wmv, mpg, ts, 3gp) & audio (m4a, mp3, aac, wav, flac, ogg, opus, wma, mka, aiff, alac) | Hardware encoders (NVENC, VideoToolbox, QSV) |
+| Smart audio mapping for single videos & batches (auto-matching by filename, manual assignment, apply one to all) | Watch-folder mode |
+| Local-only, hardened frontend, backend and DB | Cloud object storage |
+| Easy to debug and extend | Distributed queue |
 
 ## 2. Architecture
 
@@ -33,38 +35,40 @@ Dependency rule: arrows only point down. `media.py` and `security.py` import not
 
 ## 3. Request flow
 
-1. `POST /api/upload?name=clip.mov`: raw body is streamed to `uploads/<uuid>.<ext>` in chunks (size capped), then `ffprobe` confirms it is a real video. Returns `file_id`, duration, resolution.
-2. `POST /api/jobs`: validates options (enums and numeric ranges), checks trim window, inserts a `queued` row, hands the id to the worker.
-3. Worker: `queued` → `running` (progress parsed from ffmpeg `-progress`) → `done` or `failed`. The uploaded copy is deleted afterwards.
-4. UI polls `GET /api/jobs` once a second while anything is active, then offers `GET /api/jobs/{id}/download`.
+1. `POST /api/upload?name=clip.mov`: raw body is streamed to `uploads/<uuid>.<ext>` in chunks (size capped), then `ffprobe` inspects streams and detects media type (`video` or `audio`). Returns `file_id`, duration, resolution, codec.
+2. `POST /api/jobs`: validates options (enums and numeric ranges), checks trim window, verifies primary file is video and optional `audio_file_id` has audio stream, validates `batch_id` (if provided, client-generated via `crypto.randomUUID()`) and enforces `MAX_BATCH_FILES` & `MAX_BATCH_BYTES`, inserts a `queued` row, hands the id to the worker.
+3. Worker: `queued` → `running` (progress parsed from ffmpeg `-progress`) → `done` or `failed`. Uploaded copies are unlinked once all referencing jobs complete.
+4. UI polls `GET /api/jobs` once a second while anything is active. For single jobs, offers `GET /api/jobs/{id}/download`. For batches of 2+ completed jobs sharing a `batch_id`, offers `GET /api/batches/{batch_id}/download` (streamed ZIP file).
 
-Job state machine: `queued → running → done | failed`. On restart, any leftover `queued/running` rows become `failed` ("Interrupted by restart").
+Job state machine: `queued → running → done | failed`. On restart, any leftover `queued/running` rows become `failed` ("Interrupted by restart"). On startup, uploads older than 24 hours are automatically swept.
 
 ## 4. API
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/?t=<token>` | Serves the UI (token injected into a meta tag) |
-| POST | `/api/upload?name=` | Stream a video in |
-| POST | `/api/jobs` | Create job `{file_id, name, options}` |
-| GET | `/api/jobs` | List jobs (paths stripped) |
-| GET | `/api/jobs/{id}/download` | Download result |
+| POST | `/api/upload?name=` | Stream a video or audio file in |
+| POST | `/api/jobs` | Create job `{file_id, name, options, batch_id?, audio_file_id?, audio_name?}` |
+| GET | `/api/jobs` | List jobs (paths stripped, includes `batch_id` and audio details) |
+| GET | `/api/jobs/{id}/download` | Download single result |
+| GET | `/api/batches/{batch_id}/download` | Stream ZIP of completed batch outputs |
 | DELETE | `/api/jobs/{id}` | Delete job and output |
 
-Options: `mode` compress/trim, `codec` h264/h265, `quality` small/balanced/high, `speed` fast/balanced/thorough, `max_height` 2160/1440/1080/720/480/null, `container` mp4/mkv, `start`, `end` (seconds).
+Options: `mode` compress/trim/combine, `codec` h264/h265, `quality` small/balanced/high, `speed` fast/balanced/thorough, `max_height` 2160/1440/1080/720/480/null, `container` mp4/mkv, `start`, `end` (seconds), `audio_name` (string).
 
 ## 5. Data model
 
-One table, `jobs`: `id, display_name, input_path, output_path, options(JSON), status, progress, error, in_size, out_size, duration, created_at`. `status` has a `CHECK` constraint. `display_name` is for the UI only; real files are always `<uuid>.<ext>`.
+One table, `jobs`: `id, display_name, input_path, output_path, options(JSON), status, progress, error, in_size, out_size, duration, created_at, batch_id, audio_path`. `status` has a `CHECK` constraint. `display_name` is for the UI only; output files in `outputs/` are named `<safe_stem>-<tag>-<short_id>.<ext>` to reflect the video's actual name while preventing collisions. `batch_id` groups multiple jobs created together. `audio_path` stores optional replacement audio file.
 
 ## 6. FFmpeg behaviour
 
 | Mode | What runs | Speed | Notes |
 |---|---|---|---|
-| Trim only | `-c copy` | Near instant | Cuts land on keyframes, so can be off by a second or two |
-| Compress | `libx264`/`libx265`, CRF by quality, `aac 128k`, optional scale | Depends on speed preset | `+faststart` for MP4, `hvc1` tag for H.265 MP4 |
+| Fast Merge (combine) | `-c:v copy`, `-c:a aac -b:a 128k` | Instant | Maps video from source, audio from audio file; output bounded to video duration |
+| Trim only | `-c copy` (or `-c:v copy -c:a aac -b:a 128k` if audio attached) | Near instant | Cuts land on keyframes, so can be off by a second or two |
+| Compress & Merge | `libx264`/`libx265`, CRF by quality, AAC (`96k`/`128k`/`160k`), optional scale | Depends on speed preset | Replaces audio if `audio_src` attached; `+faststart` for MP4, `hvc1` tag for H.265 MP4 |
 
-CRF: H.264 28 / 23 / 19, H.265 32 / 28 / 24 (small / balanced / high). Presets: veryfast / medium / slow. Only the first video stream and first audio stream are kept; subtitles and data streams are dropped.
+CRF: H.264 30 / 23 / 19, H.265 34 / 28 / 24 (small / balanced / high). Presets: veryfast / medium / slow. Audio bitrate: 96k (small), 128k (balanced), 160k (high). When combining audio, stream `0:v:0` is mapped with `1:a:0`, dropping original video audio and extraneous subtitle/data tracks. Output length is strictly bound with `-t` to video duration. Downloads are named `<video_stem>-combined.<ext>` (or `-compressed.<ext>`).
 
 ## 7. Security model (frontend, backend, DB)
 
@@ -78,7 +82,9 @@ Reading of the requirement: *defend against* common vulnerabilities. Here is eac
 | Backend | Path traversal | Server-generated UUID filenames; `parse_id` regex; `is_within` check | `security.py` |
 | Backend | Command injection | argv list, never `shell=True`; all options are enums or numbers | `media.py`, `Options` |
 | Backend | Malicious media (SSRF via playlists, file reads) | Extension allowlist + `ffprobe` check + `-protocol_whitelist file` | `media.py` |
-| Backend | Disk exhaustion | Max upload size, streaming (no RAM blowup), cleanup of inputs | `main.upload`, `worker` |
+| Backend | Disk exhaustion | Max upload size, streaming (no RAM blowup), cleanup of inputs, 24h upload sweep | `main.upload`, `worker`, `db.init` |
+| Backend | Batch abuse | Server-enforced `MAX_BATCH_FILES` and `MAX_BATCH_BYTES` limits | `main.create_job` |
+| Backend | Zip archive extraction / traversal | Streamed `ZIP_STORED` with `force_zip64=True`, `security.is_within` verification, case-insensitive filename deduplication | `main.download_batch` |
 | Backend | Info leakage | Generic errors to client, details in `logs/`; docs/openapi disabled; absolute paths stripped from API | `main.py` |
 | DB | SQL injection | Parameterized queries; dynamic columns come from an allowlist; `CHECK` constraint | `db.py` |
 | Frontend | XSS | `textContent` only, no `innerHTML`; strict CSP (`script-src 'self'`, no inline) | `app.js`, `main.guard` |

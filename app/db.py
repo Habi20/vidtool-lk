@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   out_size INTEGER,
   duration REAL,
   created_at REAL NOT NULL,
-  batch_id TEXT
+  batch_id TEXT,
+  audio_path TEXT
 );
 """
 
@@ -53,18 +54,31 @@ def init():
         cols = [r["name"] for r in c.execute("PRAGMA table_info(jobs)").fetchall()]
         if "batch_id" not in cols:
             c.execute("ALTER TABLE jobs ADD COLUMN batch_id TEXT")
+        if "audio_path" not in cols:
+            c.execute("ALTER TABLE jobs ADD COLUMN audio_path TEXT")
         # A crash mid-encode must not leave jobs "running" forever.
         c.execute("UPDATE jobs SET status='failed', error='Interrupted by restart' WHERE status IN ('queued','running')")
     cleanup_old_uploads()
 
 
-def create_job(job_id, display_name, input_path, options: dict, in_size, duration, batch_id: str = None):
+def create_job(job_id, display_name, input_path, options: dict, in_size, duration, batch_id: str = None, audio_path: str = None):
     with conn() as c:
         c.execute(
-            "INSERT INTO jobs (id, display_name, input_path, options, status, in_size, duration, created_at, batch_id)"
-            " VALUES (?,?,?,?,?,?,?,?,?)",
-            (job_id, display_name, str(input_path), json.dumps(options), "queued", in_size, duration, time.time(), batch_id),
+            "INSERT INTO jobs (id, display_name, input_path, audio_path, options, status, in_size, duration, created_at, batch_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (job_id, display_name, str(input_path), str(audio_path) if audio_path else None, json.dumps(options), "queued", in_size, duration, time.time(), batch_id),
         )
+
+
+def is_file_referenced(path_str: str, exclude_job_id: str = None) -> bool:
+    with conn() as c:
+        query = "SELECT 1 FROM jobs WHERE (input_path=? OR audio_path=?) AND status IN ('queued','running')"
+        params = [path_str, path_str]
+        if exclude_job_id:
+            query += " AND id != ?"
+            params.append(exclude_job_id)
+        row = c.execute(query, params).fetchone()
+        return row is not None
 
 
 _UPDATABLE = {"status", "progress", "error", "output_path", "out_size"}

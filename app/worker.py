@@ -4,7 +4,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import db, media
+from . import db, media, security
 from .config import LOG_DIR, OUTPUT_DIR
 
 log = logging.getLogger("shrinkwrap.worker")
@@ -20,11 +20,14 @@ def _run(job_id: str) -> None:
     if not job:
         return
     o = json.loads(job["options"])
-    src, dst = Path(job["input_path"]), OUTPUT_DIR / f"{job_id}.{o['container']}"
+    src = Path(job["input_path"])
+    audio_src = Path(job["audio_path"]) if job.get("audio_path") else None
+
+    dst = OUTPUT_DIR / f"{job_id}.{o['container']}"
     try:
         db.update(job_id, status="running", progress=0)
         start, end = media.trim_window(o, job["duration"])
-        cmd = media.build_command(src, dst, o, job["duration"])
+        cmd = media.build_command(src, dst, o, job["duration"], audio_src=audio_src)
         log.info("job %s: %s", job_id, " ".join(cmd))
         media.run(cmd, end - start, LOG_DIR / f"{job_id}.log", lambda p: db.update(job_id, progress=p))
         db.update(job_id, status="done", progress=1, output_path=str(dst), out_size=dst.stat().st_size)
@@ -36,4 +39,7 @@ def _run(job_id: str) -> None:
         dst.unlink(missing_ok=True)
         db.update(job_id, status="failed", error="Unexpected error (see logs)")
     finally:
-        src.unlink(missing_ok=True)                   # the uploaded copy is removed once processed
+        if not db.is_file_referenced(str(src), exclude_job_id=job_id):
+            src.unlink(missing_ok=True)
+        if audio_src and not db.is_file_referenced(str(audio_src), exclude_job_id=job_id):
+            audio_src.unlink(missing_ok=True)

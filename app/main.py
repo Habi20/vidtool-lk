@@ -58,7 +58,7 @@ def auth(request: Request):
 
 
 class Options(BaseModel):
-    mode: Literal["compress", "trim"] = "compress"
+    mode: Literal["compress", "trim", "combine"] = "compress"
     codec: Literal["h264", "h265"] = "h264"
     quality: Literal["small", "balanced", "high"] = "balanced"
     speed: Literal["fast", "balanced", "thorough"] = "fast"
@@ -66,6 +66,7 @@ class Options(BaseModel):
     container: Literal["mp4", "mkv"] = "mp4"
     start: float = Field(0, ge=0, le=172800)
     end: Optional[float] = Field(None, gt=0, le=172800)
+    audio_name: Optional[str] = None
 
 
 class JobRequest(BaseModel):
@@ -73,6 +74,8 @@ class JobRequest(BaseModel):
     name: str = Field("video", max_length=255)
     options: Options
     batch_id: Optional[str] = None
+    audio_file_id: Optional[str] = None
+    audio_name: Optional[str] = Field(None, max_length=255)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -122,6 +125,23 @@ def create_job(req: JobRequest):
     except ValueError:
         raise HTTPException(400, "Invalid file id")
 
+    audio_file_id = None
+    audio_src = None
+    if req.audio_file_id:
+        try:
+            audio_file_id = security.parse_id(req.audio_file_id)
+        except ValueError:
+            raise HTTPException(400, "Invalid audio file id")
+        audio_src = next(config.UPLOAD_DIR.glob(f"{audio_file_id}.*"), None)
+        if not audio_src or not security.is_within(config.UPLOAD_DIR, audio_src):
+            raise HTTPException(404, "Audio upload not found")
+        audio_info = media.probe(audio_src)
+        if audio_info.get("media_type") not in ("audio", "video"):
+            raise HTTPException(422, "Attached audio file contains no valid audio stream")
+
+    if req.options.mode == "combine" and not audio_src:
+        raise HTTPException(422, "An audio file is required for combine mode")
+
     batch_id = None
     if req.batch_id:
         try:
@@ -136,25 +156,33 @@ def create_job(req: JobRequest):
     if not src or not security.is_within(config.UPLOAD_DIR, src):
         raise HTTPException(404, "Upload not found")
 
+    extra_audio_bytes = audio_src.stat().st_size if audio_src else 0
     if batch_id:
-        if stats["total_size"] + src.stat().st_size > config.MAX_BATCH_BYTES:
+        if stats["total_size"] + src.stat().st_size + extra_audio_bytes > config.MAX_BATCH_BYTES:
             raise HTTPException(413, "Batch total size limit exceeded")
 
     info = media.probe(src)
+    if info.get("media_type") != "video":
+        raise HTTPException(422, "Primary file must be a video")
+
     opts_dict = _to_dict(req.options)
+    if req.audio_name:
+        opts_dict["audio_name"] = security.display_name(req.audio_name)
+
     try:
         media.trim_window(opts_dict, info["duration"])
     except media.MediaError as e:
         raise HTTPException(422, str(e))
     job_id = uuid.uuid4().hex
-    db.create_job(job_id, security.display_name(req.name), src, opts_dict, src.stat().st_size, info["duration"], batch_id)
+    total_in_size = src.stat().st_size + extra_audio_bytes
+    db.create_job(job_id, security.display_name(req.name), src, opts_dict, total_in_size, info["duration"], batch_id, audio_path=audio_src)
     worker.submit(job_id)
     return db.get(job_id)
 
 
 @app.get("/api/jobs", dependencies=[Depends(auth)])
 def jobs():
-    return [{k: v for k, v in j.items() if k not in ("input_path", "output_path")} for j in db.list_jobs()]
+    return [{k: v for k, v in j.items() if k not in ("input_path", "output_path", "audio_path")} for j in db.list_jobs()]
 
 
 @app.get("/api/jobs/{job_id}/download", dependencies=[Depends(auth)])
@@ -163,8 +191,17 @@ def download(job_id: str):
     out = Path(job["output_path"] or "")
     if job["status"] != "done" or not security.is_within(config.OUTPUT_DIR, out) or not out.exists():
         raise HTTPException(404, "Output not available")
-    filename = f"{Path(job['display_name']).stem}-comp{out.suffix}"
-    return FileResponse(out, filename=filename, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    opts = {}
+    try:
+        opts = json.loads(job.get("options") or "{}")
+    except Exception:
+        pass
+    stem = Path(job["display_name"]).stem
+    has_audio = bool(job.get("audio_path")) or bool(opts.get("audio_name"))
+    mode = opts.get("mode", "compress")
+    tag = "combined" if (mode == "combine" or has_audio) else ("trimmed" if mode == "trim" else "comp")
+    filename = f"{stem}-{tag}{out.suffix}"
+    return FileResponse(out, filename=filename)
 
 
 @app.get("/api/batches/{batch_id}/download", dependencies=[Depends(auth)])
@@ -183,7 +220,15 @@ def download_batch(batch_id: str):
             if security.is_within(config.OUTPUT_DIR, out) and out.exists():
                 valid_jobs.append(j)
                 stem = Path(j["display_name"]).stem
-                raw_names.append(f"{stem}-comp{out.suffix}")
+                opts = {}
+                try:
+                    opts = json.loads(j.get("options") or "{}")
+                except Exception:
+                    pass
+                has_audio = bool(j.get("audio_path")) or bool(opts.get("audio_name"))
+                mode = opts.get("mode", "compress")
+                tag = "combined" if (mode == "combine" or has_audio) else ("trimmed" if mode == "trim" else "comp")
+                raw_names.append(f"{stem}-{tag}{out.suffix}")
 
     if not valid_jobs:
         raise HTTPException(404, "No completed outputs found for this batch")
@@ -219,8 +264,16 @@ def remove(job_id: str):
     job = _job_or_404(job_id)
     if job["status"] == "running":
         raise HTTPException(409, "Job is running")
-    if job["output_path"] and security.is_within(config.OUTPUT_DIR, Path(job["output_path"])):
+    if job.get("output_path") and security.is_within(config.OUTPUT_DIR, Path(job["output_path"])):
         Path(job["output_path"]).unlink(missing_ok=True)
+    if job.get("input_path"):
+        inp = Path(job["input_path"])
+        if security.is_within(config.UPLOAD_DIR, inp) and not db.is_file_referenced(str(inp), exclude_job_id=job_id):
+            inp.unlink(missing_ok=True)
+    if job.get("audio_path"):
+        aud = Path(job["audio_path"])
+        if security.is_within(config.UPLOAD_DIR, aud) and not db.is_file_referenced(str(aud), exclude_job_id=job_id):
+            aud.unlink(missing_ok=True)
     db.delete(job_id)
     return {"ok": True}
 
@@ -234,3 +287,4 @@ def _job_or_404(job_id: str) -> dict:
     if not job:
         raise HTTPException(404, "Job not found")
     return job
+

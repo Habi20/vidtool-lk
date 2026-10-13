@@ -15,7 +15,9 @@ DB_PATH = DATA_DIR / "jobs.db"
 MAX_UPLOAD_BYTES = int(os.environ.get("SHRINKWRAP_MAX_GB", "20")) * 1024**3
 MAX_BATCH_FILES = int(os.environ.get("SHRINKWRAP_MAX_BATCH_FILES", "50"))
 MAX_BATCH_BYTES = int(os.environ.get("SHRINKWRAP_MAX_BATCH_GB", "100")) * 1024**3
-ALLOWED_EXT = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".wmv", ".mpg", ".mpeg", ".ts", ".3gp"}
+ALLOWED_VIDEO_EXT = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".wmv", ".mpg", ".mpeg", ".ts", ".3gp"}
+ALLOWED_AUDIO_EXT = {".m4a", ".mp3", ".aac", ".wav", ".flac", ".ogg", ".opus", ".wma", ".mka", ".aiff", ".alac"}
+ALLOWED_EXT = ALLOWED_VIDEO_EXT | ALLOWED_AUDIO_EXT
 ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
 ALLOWED_ORIGINS = {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"}
 

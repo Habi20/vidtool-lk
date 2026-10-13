@@ -4,45 +4,121 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="token" content="__TOKEN__">
-<title>Shrinkwrap</title>
+<title>Shrinkwrap | Local Video Compressor & Trimmer</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header><h1>Shrinkwrap</h1><p>Compress and trim video on this computer. Nothing leaves it.</p></header>
+<div class="glow-bg"></div>
+<header>
+  <div class="header-brand">
+    <div class="logo-icon">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="2" width="20" height="20" rx="6" ry="6"></rect>
+        <line x1="7" y1="2" x2="7" y2="22"></line>
+        <line x1="17" y1="2" x2="17" y2="22"></line>
+        <line x1="2" y1="12" x2="22" y2="12"></line>
+        <line x1="2" y1="7" x2="7" y2="7"></line>
+        <line x1="2" y1="17" x2="7" y2="17"></line>
+        <line x1="17" y1="17" x2="22" y2="17"></line>
+        <line x1="17" y1="7" x2="22" y2="7"></line>
+      </svg>
+    </div>
+    <div>
+      <h1>Shrinkwrap</h1>
+      <p class="subtitle">Local video compressor & trimmer. Nothing leaves your machine.</p>
+    </div>
+  </div>
+  <div class="badges">
+    <span class="badge"><span class="dot"></span> 100% Local</span>
+    <span class="badge">Zero Cloud</span>
+    <span class="badge">FFmpeg Engine</span>
+  </div>
+</header>
 <main>
   <section class="panel" aria-labelledby="add">
-    <h2 id="add">Add a video</h2>
+    <h2 id="add">Add videos</h2>
     <label id="drop" class="drop" tabindex="0">
-      <input id="file" type="file" accept="video/*,.mkv,.ts,.flv,.wmv,.mpg,.mpeg,.3gp" hidden>
-      <span id="dropText">Drop a video here, or choose a file</span>
+      <input id="file" type="file" accept="video/*,audio/*,.mkv,.ts,.flv,.wmv,.mpg,.mpeg,.3gp,.m4a,.mp3,.aac,.wav,.flac,.ogg,.opus,.wma" multiple hidden>
+      <div class="drop-icon">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="17 8 12 3 7 8"></polyline>
+          <line x1="12" y1="3" x2="12" y2="15"></line>
+        </svg>
+      </div>
+      <span id="dropText">Drop videos & audio files here, or click to choose</span>
       <progress id="up" max="1" value="0" hidden></progress>
     </label>
+
+    <!-- Single video audio attachment -->
+    <div id="singleAudioSection" class="audio-section" hidden>
+      <div id="singleAudioEmpty" class="audio-empty-box">
+        <label class="audio-attach-btn" tabindex="0">
+          <input id="singleAudioFile" type="file" accept="audio/*,.m4a,.mp3,.aac,.wav,.flac,.ogg,.opus,.wma,.mka" hidden>
+          <span>🎵 Attach replacement audio (.m4a, .mp3, .wav...)</span>
+        </label>
+      </div>
+      <div id="singleAudioAttached" class="audio-attached-card" hidden>
+        <div class="audio-attached-info">
+          <span class="audio-icon">🎵</span>
+          <div class="audio-attached-details">
+            <span id="singleAudioName" class="audio-name">audio.m4a</span>
+            <span id="singleAudioMeta" class="audio-meta"></span>
+          </div>
+        </div>
+        <button id="singleAudioRemove" type="button" class="link">Remove</button>
+      </div>
+    </div>
+
+    <!-- Batch audio toolbar -->
+    <div id="batchToolbar" class="batch-toolbar" hidden>
+      <div class="batch-toolbar-row">
+        <select id="batchGlobalAudioSelect" class="batch-global-select" title="Assign an audio file to all videos">
+          <option value="">Apply audio to all videos...</option>
+        </select>
+        <button id="batchAutoMatchBtn" type="button" class="btn-sm" title="Match videos and audios with the same name">Auto-match by name</button>
+        <label class="btn-sm btn-attach" tabindex="0" title="Add audio files to available pool">
+          <input id="batchAudioInput" type="file" accept="audio/*,.m4a,.mp3,.aac,.wav,.flac,.ogg,.opus,.wma,.mka" multiple hidden>
+          <span>+ Add audio files</span>
+        </label>
+      </div>
+    </div>
+
+    <ul id="fileList" class="file-list" hidden></ul>
     <p id="meta" class="muted"></p>
+    <p id="trimNote" class="trim-note" hidden>Trimming is disabled for batch compression. To trim a video, select a single file.</p>
 
     <div class="seg" role="radiogroup" aria-label="Mode">
-      <label><input type="radio" name="mode" value="compress" checked><span>Compress</span></label>
-      <label><input type="radio" name="mode" value="trim"><span>Trim only (instant)</span></label>
+      <label><input type="radio" name="mode" value="compress" checked><span>Compress & Merge</span></label>
+      <label id="combineRadioLabel"><input type="radio" name="mode" value="combine"><span>Fast Merge (instant)</span></label>
+      <label id="trimRadioLabel"><input type="radio" name="mode" value="trim"><span>Trim only (instant)</span></label>
     </div>
+    <p id="modeDesc" class="mode-desc">Compresses video to reduce file size. Merges attached audio without bloating file size.</p>
 
     <div id="encOpts" class="grid">
       <label>Size<select id="quality"><option value="small">Smallest file</option><option value="balanced" selected>Balanced</option><option value="high">Best quality</option></select></label>
-      <label>Codec<select id="codec"><option value="h264">H.264 (plays everywhere)</option><option value="h265">H.265 (about 30% smaller)</option></select></label>
+      <label>Codec<select id="codec"><option value="h264">H.264 (universal compatibility)</option><option value="h265">H.265 (high compression)</option></select></label>
       <label>Resolution<select id="height"><option value="">Keep original</option><option>1080</option><option>720</option><option>480</option></select></label>
       <label>Speed<select id="speed"><option value="fast">Fast</option><option value="balanced">Balanced</option><option value="thorough">Thorough (slowest)</option></select></label>
     </div>
     <div class="grid">
-      <label>Trim start<input id="start" placeholder="0:00" inputmode="numeric"></label>
-      <label>Trim end<input id="end" placeholder="End of video" inputmode="numeric"></label>
+      <label id="startLabel">Trim start<input id="start" placeholder="0:00" inputmode="numeric"></label>
+      <label id="endLabel">Trim end<input id="end" placeholder="End of video" inputmode="numeric"></label>
       <label>Save as<select id="container"><option value="mp4">MP4</option><option value="mkv">MKV</option></select></label>
     </div>
-    <button id="go" disabled>Start</button>
+    <button id="go" disabled>
+      <span id="goText">Start Job</span>
+    </button>
     <p id="msg" role="alert" class="error"></p>
   </section>
 
   <section class="panel" aria-labelledby="jobs">
-    <h2 id="jobs">Your videos</h2>
+    <div class="panel-header">
+      <h2 id="jobs">Your videos</h2>
+      <span class="active-indicator">Processing queue</span>
+    </div>
     <ul id="list"></ul>
-    <p id="empty" class="muted">Finished videos appear here with how much space you saved.</p>
+    <p id="empty" class="muted">Finished videos will appear here with calculated space savings.</p>
   </section>
 </main>
 <script src="/static/app.js"></script>
