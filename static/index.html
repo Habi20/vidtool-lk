@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="token" content="__TOKEN__">
+<title>Shrinkwrap</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header><h1>Shrinkwrap</h1><p>Compress and trim video on this computer. Nothing leaves it.</p></header>
+<main>
+  <section class="panel" aria-labelledby="add">
+    <h2 id="add">Add a video</h2>
+    <label id="drop" class="drop" tabindex="0">
+      <input id="file" type="file" accept="video/*,.mkv,.ts,.flv,.wmv,.mpg,.mpeg,.3gp" hidden>
+      <span id="dropText">Drop a video here, or choose a file</span>
+      <progress id="up" max="1" value="0" hidden></progress>
+    </label>
+    <p id="meta" class="muted"></p>
+
+    <div class="seg" role="radiogroup" aria-label="Mode">
+      <label><input type="radio" name="mode" value="compress" checked><span>Compress</span></label>
+      <label><input type="radio" name="mode" value="trim"><span>Trim only (instant)</span></label>
+    </div>
+
+    <div id="encOpts" class="grid">
+      <label>Size<select id="quality"><option value="small">Smallest file</option><option value="balanced" selected>Balanced</option><option value="high">Best quality</option></select></label>
+      <label>Codec<select id="codec"><option value="h264">H.264 (plays everywhere)</option><option value="h265">H.265 (about 30% smaller)</option></select></label>
+      <label>Resolution<select id="height"><option value="">Keep original</option><option>1080</option><option>720</option><option>480</option></select></label>
+      <label>Speed<select id="speed"><option value="fast">Fast</option><option value="balanced">Balanced</option><option value="thorough">Thorough (slowest)</option></select></label>
+    </div>
+    <div class="grid">
+      <label>Trim start<input id="start" placeholder="0:00" inputmode="numeric"></label>
+      <label>Trim end<input id="end" placeholder="End of video" inputmode="numeric"></label>
+      <label>Save as<select id="container"><option value="mp4">MP4</option><option value="mkv">MKV</option></select></label>
+    </div>
+    <button id="go" disabled>Start</button>
+    <p id="msg" role="alert" class="error"></p>
+  </section>
+
+  <section class="panel" aria-labelledby="jobs">
+    <h2 id="jobs">Your videos</h2>
+    <ul id="list"></ul>
+    <p id="empty" class="muted">Finished videos appear here with how much space you saved.</p>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
